@@ -1,7 +1,8 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs/promises");
+const fs = require("fs");
+const fsPromises = require("fs/promises");
 const supabase = require("../db");
 
 const router = express.Router();
@@ -13,13 +14,19 @@ const {
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
+        let folder = "";
+
         if (file.mimetype.startsWith("image/")) {
-            cb(null, path.join(__dirname, "../uploads/images"));
+            folder = "images";
         } else if (file.mimetype.startsWith("video/")) {
-            cb(null, path.join(__dirname, "../uploads/videos"));
+            folder = "videos";
         } else {
-            cb(new Error("Tipo de archivo no permitido"));
+            return cb(new Error("Tipo de archivo no permitido"));
         }
+
+        const uploadDir = path.join(__dirname, "../uploads", folder);
+        fs.mkdirSync(uploadDir, { recursive: true });
+        cb(null, uploadDir);
     },
     filename: (req, file, cb) => {
         const uniqueName = Date.now() + "-" + file.originalname.replace(/\s+/g, "-");
@@ -161,7 +168,7 @@ router.delete(
             if (content?.file_name && content?.type) {
                 const folder = content.type === "image" ? "images" : "videos";
                 const filePath = path.join(__dirname, "../uploads", folder, content.file_name);
-                await fs.unlink(filePath).catch((unlinkError) => {
+                await fsPromises.unlink(filePath).catch((unlinkError) => {
                     if (unlinkError.code !== "ENOENT") {
                         console.error("No se pudo eliminar archivo:", unlinkError);
                     }
