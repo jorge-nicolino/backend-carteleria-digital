@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
+const fs = require("fs/promises");
 const supabase = require("../db");
 
 const router = express.Router();
@@ -72,7 +73,7 @@ router.post(
     upload.single("file"),
     async (req, res) => {
         try {
-            const { title, description, duration_seconds } = req.body;
+            const { title, description } = req.body;
 
             if (!req.file) {
                 return res.status(400).json({ message: "No se subió ningún archivo" });
@@ -100,7 +101,7 @@ router.post(
                         type,
                         file_name: req.file.filename,
                         file_url: fileUrl,
-                        duration_seconds: duration_seconds ? Number(duration_seconds) : 10,
+                        duration_seconds: null,
                         is_active: true,
                     },
                 ])
@@ -130,24 +131,49 @@ router.post(
         }
     });
 
-router.delete("/:id", async (req, res) => {
-    try {
-        const { id } = req.params;
+router.delete(
+    "/:id",
+    verifyToken,
+    authorizeRoles("admin", "marketing"),
+    async (req, res) => {
+        try {
+            const { id } = req.params;
+            const { data: content } = await supabase
+                .from("contents")
+                .select("file_name, type")
+                .eq("id", id)
+                .single();
 
-        const { error } = await supabase
-            .from("contents")
-            .delete()
-            .eq("id", id);
+            await supabase
+                .from("playlist_items")
+                .delete()
+                .eq("content_id", id);
 
-        if (error) {
-            return res.status(400).json({ message: error.message });
+            const { error } = await supabase
+                .from("contents")
+                .delete()
+                .eq("id", id);
+
+            if (error) {
+                return res.status(400).json({ message: error.message });
+            }
+
+            if (content?.file_name && content?.type) {
+                const folder = content.type === "image" ? "images" : "videos";
+                const filePath = path.join(__dirname, "../uploads", folder, content.file_name);
+                await fs.unlink(filePath).catch((unlinkError) => {
+                    if (unlinkError.code !== "ENOENT") {
+                        console.error("No se pudo eliminar archivo:", unlinkError);
+                    }
+                });
+            }
+
+            res.json({ message: "Contenido eliminado correctamente" });
+        } catch (error) {
+            res.status(500).json({ message: "Error eliminando contenido" });
         }
-
-        res.json({ message: "Contenido eliminado correctamente" });
-    } catch (error) {
-        res.status(500).json({ message: "Error eliminando contenido" });
     }
-});
+);
 
 router.patch(
     "/:id",

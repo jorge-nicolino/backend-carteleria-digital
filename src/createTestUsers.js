@@ -1,4 +1,5 @@
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const supabase = require("./db");
 require("dotenv").config();
 
@@ -27,17 +28,20 @@ async function createUser({ name, email, password, role }) {
 }
 
 async function main() {
+    const marketingPassword = process.env.MARKETING_INITIAL_PASSWORD || crypto.randomBytes(9).toString("base64url");
+    const viewerPassword = process.env.VIEWER_INITIAL_PASSWORD || crypto.randomBytes(9).toString("base64url");
+
     await createUser({
         name: "Marketing Colegio",
         email: "marketing@colegio.com",
-        password: "marketing1234",
+        password: marketingPassword,
         role: "marketing",
     });
 
     await createUser({
         name: "Usuario Observador",
         email: "viewer@colegio.com",
-        password: "viewer1234",
+        password: viewerPassword,
         role: "viewer",
     });
 }

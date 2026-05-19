@@ -74,7 +74,6 @@ function playCurrent() {
 
         const duration =
             item.duration_seconds ||
-            content.duration_seconds ||
             10;
 
         setTimeout(() => {
@@ -105,9 +104,7 @@ function playCurrent() {
         };
 
         // fallback si no dispara onended
-        const fallbackDuration =
-            item.duration_seconds ||
-            content.duration_seconds;
+        const fallbackDuration = item.duration_seconds;
 
         if (fallbackDuration) {
             setTimeout(() => {

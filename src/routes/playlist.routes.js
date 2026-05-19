@@ -65,6 +65,80 @@ router.get(
     });
 
 // =========================
+// RENOMBRAR / EDITAR PLAYLIST
+// =========================
+router.patch(
+    "/:id",
+    verifyToken,
+    authorizeRoles("admin", "marketing"),
+    async (req, res) => {
+        try {
+            const { id } = req.params;
+            const { name, description } = req.body;
+
+            if (!name) {
+                return res.status(400).json({ message: "El nombre es obligatorio" });
+            }
+
+            const { data, error } = await supabase
+                .from("playlists")
+                .update({
+                    name,
+                    description: description || "",
+                })
+                .eq("id", id)
+                .select()
+                .single();
+
+            if (error) {
+                return res.status(400).json({ message: error.message });
+            }
+
+            res.json(data);
+        } catch (error) {
+            res.status(500).json({ message: "Error actualizando playlist" });
+        }
+    }
+);
+
+// =========================
+// ELIMINAR PLAYLIST
+// =========================
+router.delete(
+    "/:id",
+    verifyToken,
+    authorizeRoles("admin", "marketing"),
+    async (req, res) => {
+        try {
+            const { id } = req.params;
+
+            await supabase
+                .from("playlist_items")
+                .delete()
+                .eq("playlist_id", id);
+
+            await supabase
+                .from("screens")
+                .update({ playlist_id: null })
+                .eq("playlist_id", id);
+
+            const { error } = await supabase
+                .from("playlists")
+                .delete()
+                .eq("id", id);
+
+            if (error) {
+                return res.status(400).json({ message: error.message });
+            }
+
+            res.json({ message: "Playlist eliminada correctamente" });
+        } catch (error) {
+            res.status(500).json({ message: "Error eliminando playlist" });
+        }
+    }
+);
+
+// =========================
 // AGREGAR CONTENIDO A PLAYLIST
 // =========================
 router.post(
@@ -80,6 +154,10 @@ router.post(
                 return res.status(400).json({ message: "content_id requerido" });
             }
 
+            if (!duration_seconds || Number(duration_seconds) < 1) {
+                return res.status(400).json({ message: "La duracion es obligatoria" });
+            }
+
             const { data, error } = await supabase
                 .from("playlist_items")
                 .insert([
@@ -87,7 +165,7 @@ router.post(
                         playlist_id: id,
                         content_id,
                         order_index: order_index || 0,
-                        duration_seconds: duration_seconds || null,
+                        duration_seconds: Number(duration_seconds),
                     },
                 ])
                 .select()
@@ -109,7 +187,7 @@ router.post(
 router.get(
     "/:id",
     verifyToken,
-    authorizeRoles("admin", "marketing"),
+    authorizeRoles("admin", "marketing", "viewer"),
     async (req, res) => {
         try {
             const { id } = req.params;

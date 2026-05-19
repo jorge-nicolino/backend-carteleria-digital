@@ -1,9 +1,10 @@
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const supabase = require("./db");
 require("dotenv").config();
 
 async function createAdmin() {
-    const password = "admin1234";
+    const password = process.env.ADMIN_INITIAL_PASSWORD || crypto.randomBytes(9).toString("base64url");
     const password_hash = await bcrypt.hash(password, 10);
 
     const { data, error } = await supabase
@@ -26,7 +27,7 @@ async function createAdmin() {
     console.log("Usuario admin creado:");
     console.log(data);
     console.log("Email: admin@colegio.com");
-    console.log("Password: admin1234");
+    console.log(`Password: ${password}`);
 }
 
 createAdmin();

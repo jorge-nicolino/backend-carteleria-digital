@@ -8,6 +8,7 @@ const contentRoutes = require("./routes/content.routes");
 const playlistRoutes = require("./routes/playlist.routes");
 const playerRoutes = require("./routes/player.routes");
 const screenRoutes = require("./routes/screen.routes");
+const userRoutes = require("./routes/user.routes");
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.use("/api/contents", contentRoutes);
 app.use("/api/playlists", playlistRoutes);
 app.use("/api/player", playerRoutes);
 app.use("/api/screens", screenRoutes);
+app.use("/api/users", userRoutes);
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
@@ -44,5 +46,5 @@ app.get("/health", (req, res) => {
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-    console.log(`Servidor backend corriendo en http://localhost:${PORT}`);
+    console.log(`Servidor backend corriendo en el puerto ${PORT}`);
 });

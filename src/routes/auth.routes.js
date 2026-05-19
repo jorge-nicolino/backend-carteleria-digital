@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const supabase = require("../db");
+const { verifyToken } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -62,6 +63,55 @@ router.post("/login", async (req, res) => {
         res.status(500).json({
             message: "Error interno del servidor",
         });
+    }
+});
+
+router.patch("/change-password", verifyToken, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({
+                message: "Contrasena actual y nueva son obligatorias",
+            });
+        }
+
+        if (newPassword.length < 6) {
+            return res.status(400).json({
+                message: "La nueva contrasena debe tener al menos 6 caracteres",
+            });
+        }
+
+        const { data: user, error } = await supabase
+            .from("users_app")
+            .select("*")
+            .eq("id", req.user.id)
+            .single();
+
+        if (error || !user) {
+            return res.status(404).json({ message: "Usuario no encontrado" });
+        }
+
+        const validPassword = await bcrypt.compare(currentPassword, user.password_hash);
+
+        if (!validPassword) {
+            return res.status(401).json({ message: "La contrasena actual no es correcta" });
+        }
+
+        const password_hash = await bcrypt.hash(newPassword, 10);
+
+        const { error: updateError } = await supabase
+            .from("users_app")
+            .update({ password_hash })
+            .eq("id", req.user.id);
+
+        if (updateError) {
+            return res.status(400).json({ message: updateError.message });
+        }
+
+        res.json({ message: "Contrasena actualizada correctamente" });
+    } catch (error) {
+        res.status(500).json({ message: "Error cambiando contrasena" });
     }
 });
 
