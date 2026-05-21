@@ -6,6 +6,7 @@ const fsPromises = require("fs/promises");
 const supabase = require("../db");
 
 const router = express.Router();
+const UPLOAD_DB_TIMEOUT_MS = Number(process.env.UPLOAD_DB_TIMEOUT_MS || 30000);
 
 const {
     verifyToken,
@@ -79,10 +80,12 @@ router.post(
     authorizeRoles("admin", "marketing"),
     upload.single("file"),
     async (req, res) => {
+        const uploadedFile = req.file;
+
         try {
             const { title, description } = req.body;
 
-            if (!req.file) {
+            if (!uploadedFile) {
                 return res.status(400).json({ message: "No se subió ningún archivo" });
             }
 
@@ -90,14 +93,16 @@ router.post(
                 return res.status(400).json({ message: "El título es obligatorio" });
             }
 
-            const isImage = req.file.mimetype.startsWith("image/");
+            const isImage = uploadedFile.mimetype.startsWith("image/");
             const type = isImage ? "image" : "video";
 
             const folder = isImage ? "images" : "videos";
 
             const baseUrl = process.env.PUBLIC_BACKEND_URL || `${req.protocol}://${req.get("host")}`;
 
-            const fileUrl = `${baseUrl}/uploads/${folder}/${req.file.filename}`;
+            const fileUrl = `${baseUrl}/uploads/${folder}/${encodeURIComponent(uploadedFile.filename)}`;
+            const abortController = new AbortController();
+            const abortTimeout = setTimeout(() => abortController.abort(), UPLOAD_DB_TIMEOUT_MS);
 
             const { data, error } = await supabase
                 .from("contents")
@@ -106,16 +111,20 @@ router.post(
                         title,
                         description: description || "",
                         type,
-                        file_name: req.file.filename,
+                        file_name: uploadedFile.filename,
                         file_url: fileUrl,
                         duration_seconds: null,
                         is_active: true,
                     },
                 ])
                 .select()
-                .single();
+                .single()
+                .abortSignal(abortController.signal);
+
+            clearTimeout(abortTimeout);
 
             if (error) {
+                await fsPromises.unlink(uploadedFile.path).catch(() => {});
                 return res.status(400).json({ message: error.message });
             }
 
@@ -126,9 +135,19 @@ router.post(
         } catch (error) {
             console.error("Error subiendo contenido:", error);
 
+            if (uploadedFile?.path) {
+                await fsPromises.unlink(uploadedFile.path).catch(() => {});
+            }
+
             if (error.code === "LIMIT_FILE_SIZE") {
                 return res.status(400).json({
                     message: "El archivo es demasiado grande. Máximo permitido: 300 MB.",
+                });
+            }
+
+            if (error.name === "AbortError") {
+                return res.status(504).json({
+                    message: "La base de datos tardo demasiado en responder. Intenta nuevamente.",
                 });
             }
 

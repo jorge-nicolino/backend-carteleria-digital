@@ -6,6 +6,8 @@ const DEVICE_ID = params.get("deviceId");
 let playlist = [];
 let currentIndex = 0;
 let isPlaying = false;
+let playbackToken = 0;
+let activeTimers = [];
 
 if (!DEVICE_ID) {
     showMessage("No se indicó deviceId en la URL");
@@ -36,6 +38,9 @@ async function loadPlaylist(resetPlayer = false) {
         }
 
         playlist = newPlaylist;
+        if (currentIndex >= playlist.length) {
+            currentIndex = 0;
+        }
 
         if (resetPlayer && !isPlaying) {
             currentIndex = 0;
@@ -51,6 +56,9 @@ function playCurrent() {
     if (!playlist.length) return;
 
     isPlaying = true;
+    clearPlaybackTimers();
+    playbackToken++;
+    const token = playbackToken;
 
     const item = playlist[currentIndex];
     const content = item.contents;
@@ -59,7 +67,7 @@ function playCurrent() {
     player.innerHTML = "";
 
     if (!content) {
-        nextItem();
+        nextItem(token);
         return;
     }
 
@@ -68,7 +76,7 @@ function playCurrent() {
     // =====================
     if (content.type === "image") {
         const img = document.createElement("img");
-        img.src = content.file_url;
+        img.src = buildPlaybackUrl(content.file_url, item.id);
 
         player.appendChild(img);
 
@@ -76,9 +84,10 @@ function playCurrent() {
             item.duration_seconds ||
             10;
 
-        setTimeout(() => {
-            nextItem();
+        const timerId = setTimeout(() => {
+            nextItem(token);
         }, duration * 1000);
+        activeTimers.push(timerId);
     }
 
     // =====================
@@ -87,38 +96,52 @@ function playCurrent() {
     if (content.type === "video") {
         const video = document.createElement("video");
 
-        video.src = content.file_url;
+        video.src = buildPlaybackUrl(content.file_url, item.id);
         video.autoplay = true;
         video.muted = true;
         video.playsInline = true;
+        video.preload = "auto";
 
         player.appendChild(video);
 
         video.onended = () => {
-            nextItem();
+            nextItem(token);
         };
 
         video.onerror = () => {
             console.error("Error reproduciendo video");
-            nextItem();
+            nextItem(token);
         };
+
+        video.load();
+        video.play().catch((error) => {
+            console.error("No se pudo iniciar el video", error);
+            nextItem(token);
+        });
 
         // fallback si no dispara onended
         const fallbackDuration = item.duration_seconds;
 
         if (fallbackDuration) {
-            setTimeout(() => {
+            const timerId = setTimeout(() => {
                 if (!video.paused) {
                     video.pause();
                 }
 
-                nextItem();
+                nextItem(token);
             }, fallbackDuration * 1000);
+            activeTimers.push(timerId);
         }
     }
 }
 
-function nextItem() {
+function nextItem(token) {
+    if (token && token !== playbackToken) {
+        return;
+    }
+
+    clearPlaybackTimers();
+
     currentIndex++;
 
     if (currentIndex >= playlist.length) {
@@ -128,8 +151,24 @@ function nextItem() {
     playCurrent();
 }
 
+function clearPlaybackTimers() {
+    activeTimers.forEach((timerId) => clearTimeout(timerId));
+    activeTimers = [];
+}
+
+function buildPlaybackUrl(fileUrl, itemId) {
+    const url = new URL(fileUrl, window.location.origin);
+    url.searchParams.set("deviceId", DEVICE_ID);
+    url.searchParams.set("itemId", itemId);
+    return url.toString();
+}
+
 function showMessage(message) {
     const player = document.getElementById("player");
+
+    isPlaying = false;
+    clearPlaybackTimers();
+    playbackToken++;
 
     player.innerHTML = `
     <div style="

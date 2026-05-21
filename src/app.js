@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const multer = require("multer");
 require("dotenv").config();
 
 const authRoutes = require("./routes/auth.routes");
@@ -23,7 +24,12 @@ app.use("/api/player", playerRoutes);
 app.use("/api/screens", screenRoutes);
 app.use("/api/users", userRoutes);
 
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
+    maxAge: "7d",
+    setHeaders: (res) => {
+        res.setHeader("Cache-Control", "public, max-age=604800");
+    },
+}));
 
 app.use("/player-files", express.static(path.join(__dirname, "player")));
 
@@ -42,6 +48,26 @@ app.get("/health", (req, res) => {
         status: "ok",
         service: "carteleria-digital-backend",
     });
+});
+
+app.use((error, req, res, next) => {
+    if (error instanceof multer.MulterError) {
+        if (error.code === "LIMIT_FILE_SIZE") {
+            return res.status(400).json({
+                message: "El archivo es demasiado grande. Maximo permitido: 300 MB.",
+            });
+        }
+
+        return res.status(400).json({ message: error.message });
+    }
+
+    if (error) {
+        return res.status(400).json({
+            message: error.message || "Error procesando la solicitud",
+        });
+    }
+
+    next();
 });
 
 const PORT = process.env.PORT || 3001;
