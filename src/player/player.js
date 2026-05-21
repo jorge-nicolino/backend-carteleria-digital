@@ -76,7 +76,7 @@ function playCurrent() {
     // =====================
     if (content.type === "image") {
         const img = document.createElement("img");
-        img.src = buildPlaybackUrl(content.file_url, item.id);
+        img.src = content.file_url;
 
         player.appendChild(img);
 
@@ -96,7 +96,7 @@ function playCurrent() {
     if (content.type === "video") {
         const video = document.createElement("video");
 
-        video.src = buildPlaybackUrl(content.file_url, item.id);
+        video.src = content.file_url;
         video.autoplay = true;
         video.muted = true;
         video.playsInline = true;
@@ -154,13 +154,6 @@ function nextItem(token) {
 function clearPlaybackTimers() {
     activeTimers.forEach((timerId) => clearTimeout(timerId));
     activeTimers = [];
-}
-
-function buildPlaybackUrl(fileUrl, itemId) {
-    const url = new URL(fileUrl, window.location.origin);
-    url.searchParams.set("deviceId", DEVICE_ID);
-    url.searchParams.set("itemId", itemId);
-    return url.toString();
 }
 
 function showMessage(message) {

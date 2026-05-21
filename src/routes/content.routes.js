@@ -6,7 +6,6 @@ const fsPromises = require("fs/promises");
 const supabase = require("../db");
 
 const router = express.Router();
-const UPLOAD_DB_TIMEOUT_MS = Number(process.env.UPLOAD_DB_TIMEOUT_MS || 30000);
 
 const {
     verifyToken,
@@ -101,8 +100,6 @@ router.post(
             const baseUrl = process.env.PUBLIC_BACKEND_URL || `${req.protocol}://${req.get("host")}`;
 
             const fileUrl = `${baseUrl}/uploads/${folder}/${encodeURIComponent(uploadedFile.filename)}`;
-            const abortController = new AbortController();
-            const abortTimeout = setTimeout(() => abortController.abort(), UPLOAD_DB_TIMEOUT_MS);
 
             const { data, error } = await supabase
                 .from("contents")
@@ -118,10 +115,7 @@ router.post(
                     },
                 ])
                 .select()
-                .single()
-                .abortSignal(abortController.signal);
-
-            clearTimeout(abortTimeout);
+                .single();
 
             if (error) {
                 await fsPromises.unlink(uploadedFile.path).catch(() => {});
@@ -142,12 +136,6 @@ router.post(
             if (error.code === "LIMIT_FILE_SIZE") {
                 return res.status(400).json({
                     message: "El archivo es demasiado grande. Máximo permitido: 300 MB.",
-                });
-            }
-
-            if (error.name === "AbortError") {
-                return res.status(504).json({
-                    message: "La base de datos tardo demasiado en responder. Intenta nuevamente.",
                 });
             }
 
