@@ -5,7 +5,7 @@ const fs = require("fs");
 const fsPromises = require("fs/promises");
 const { spawn } = require("child_process");
 const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg");
-const ffprobeInstaller = require("@ffprobe-installer/ffprobe");
+const sharp = require("sharp");
 const supabase = require("../db");
 
 const router = express.Router();
@@ -13,7 +13,6 @@ const router = express.Router();
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024;
 const MAX_VIDEO_DURATION_SECONDS = 10 * 60;
 const FFMPEG_COMMAND = process.env.FFMPEG_PATH || ffmpegInstaller.path || "ffmpeg";
-const FFPROBE_COMMAND = process.env.FFPROBE_PATH || ffprobeInstaller.path || "ffprobe";
 const VIDEO_SCALE_FILTER = "scale='if(gt(a,1280/720),min(1280,iw),-2)':'if(gt(a,1280/720),-2,min(720,ih))'";
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"];
@@ -103,24 +102,37 @@ function runCommand(command, args) {
 }
 
 async function getVideoDurationSeconds(filePath) {
-    const { stdout } = await runCommand(FFPROBE_COMMAND, [
+    const { stdout } = await runCommand(FFMPEG_COMMAND, [
         "-v",
         "error",
         "-show_entries",
         "format=duration",
         "-of",
         "json",
+        "-i",
         filePath,
     ]);
 
-    const metadata = JSON.parse(stdout);
-    const duration = Number(metadata.format?.duration);
+    try {
+        const metadata = JSON.parse(stdout);
+        const duration = Number(metadata.format?.duration);
 
-    if (!Number.isFinite(duration)) {
-        throw new Error("No se pudo obtener la duracion del video");
+        if (!Number.isFinite(duration)) {
+            throw new Error("No se pudo obtener la duracion del video");
+        }
+
+        return duration;
+    } catch (e) {
+        // Intenta obtener duración usando ffmpeg stdout
+        const durationMatch = stdout.match(/Duration: (\d+):(\d+):(\d+)/);
+        if (durationMatch) {
+            const hours = parseInt(durationMatch[1], 10);
+            const minutes = parseInt(durationMatch[2], 10);
+            const seconds = parseInt(durationMatch[3], 10);
+            return hours * 3600 + minutes * 60 + seconds;
+        }
+        throw e;
     }
-
-    return duration;
 }
 
 async function optimizeVideo(inputPath, outputPath) {
@@ -141,21 +153,44 @@ async function optimizeVideo(inputPath, outputPath) {
         "-preset",
         "fast",
         "-crf",
-        "28",
+        "24",
         "-maxrate",
-        "2M",
+        "3M",
         "-bufsize",
-        "4M",
+        "6M",
         "-r",
         "30",
         "-c:a",
         "aac",
         "-b:a",
-        "96k",
+        "128k",
         "-movflags",
         "+faststart",
         outputPath,
     ]);
+}
+
+async function optimizeImage(inputPath, outputPath, mimeType) {
+    const sharpInstance = sharp(inputPath);
+
+    if (mimeType === "image/webp") {
+        await sharpInstance
+            .webp({ quality: 82 })
+            .toFile(outputPath);
+    } else if (mimeType === "image/png") {
+        await sharpInstance
+            .png({ quality: 85, compressionLevel: 9 })
+            .toFile(outputPath);
+    } else {
+        // JPEG - mejor compresión
+        await sharpInstance
+            .resize(1920, 1080, {
+                fit: "inside",
+                withoutEnlargement: true,
+            })
+            .jpeg({ quality: 85, progressive: true })
+            .toFile(outputPath);
+    }
 }
 
 async function createVideoThumbnail(inputPath, outputPath) {
@@ -173,6 +208,29 @@ async function createVideoThumbnail(inputPath, outputPath) {
         "3",
         outputPath,
     ]);
+}
+
+async function prepareOptimizedImage(uploadedFile) {
+    const imagesDir = path.join(__dirname, "../uploads/images");
+    await fsPromises.mkdir(imagesDir, { recursive: true });
+
+    const baseName = path.parse(uploadedFile.filename).name;
+    const optimizedFilename = `${baseName}.webp`;
+    const optimizedPath = path.join(imagesDir, optimizedFilename);
+
+    try {
+        // Convertir y optimizar a webp (mejor compresión)
+        await optimizeImage(uploadedFile.path, optimizedPath, "image/webp");
+        await fsPromises.unlink(uploadedFile.path).catch(() => {});
+    } catch (error) {
+        await fsPromises.unlink(optimizedPath).catch(() => {});
+        throw error;
+    }
+
+    return {
+        fileName: optimizedFilename,
+        filePath: optimizedPath,
+    };
 }
 
 async function prepareOptimizedVideo(uploadedFile) {
@@ -256,9 +314,10 @@ router.post(
             const isImage = uploadedFile.mimetype.startsWith("image/");
             const type = isImage ? "image" : "video";
 
+            const preparedImage = isImage ? await prepareOptimizedImage(uploadedFile) : null;
             const preparedVideo = isImage ? null : await prepareOptimizedVideo(uploadedFile);
             const folder = isImage ? "images" : "videos";
-            const fileName = isImage ? uploadedFile.filename : preparedVideo.fileName;
+            const fileName = isImage ? preparedImage.fileName : preparedVideo.fileName;
             const durationSeconds = isImage ? null : preparedVideo.durationSeconds;
 
             const baseUrl = process.env.PUBLIC_BACKEND_URL || `${req.protocol}://${req.get("host")}`;
@@ -283,6 +342,9 @@ router.post(
 
             if (error) {
                 await fsPromises.unlink(uploadedFile.path).catch(() => {});
+                if (preparedImage?.filePath) {
+                    await fsPromises.unlink(preparedImage.filePath).catch(() => {});
+                }
                 if (preparedVideo?.filePath) {
                     await fsPromises.unlink(preparedVideo.filePath).catch(() => {});
                 }
