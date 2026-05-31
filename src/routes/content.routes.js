@@ -3,9 +3,20 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const fsPromises = require("fs/promises");
+const { spawn } = require("child_process");
+const ffmpegInstaller = require("@ffmpeg-installer/ffmpeg");
+const ffprobeInstaller = require("@ffprobe-installer/ffprobe");
 const supabase = require("../db");
 
 const router = express.Router();
+
+const MAX_UPLOAD_SIZE = 500 * 1024 * 1024;
+const MAX_VIDEO_DURATION_SECONDS = 10 * 60;
+const FFMPEG_COMMAND = process.env.FFMPEG_PATH || ffmpegInstaller.path || "ffmpeg";
+const FFPROBE_COMMAND = process.env.FFPROBE_PATH || ffprobeInstaller.path || "ffprobe";
+const VIDEO_SCALE_FILTER = "scale='if(gt(a,1280/720),min(1280,iw),-2)':'if(gt(a,1280/720),-2,min(720,ih))'";
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"];
 
 const {
     verifyToken,
@@ -15,11 +26,12 @@ const {
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         let folder = "";
+        const extension = path.extname(file.originalname).toLowerCase();
 
         if (file.mimetype.startsWith("image/")) {
             folder = "images";
-        } else if (file.mimetype.startsWith("video/")) {
-            folder = "videos";
+        } else if (ALLOWED_VIDEO_EXTENSIONS.includes(extension)) {
+            folder = "tmp";
         } else {
             return cb(new Error("Tipo de archivo no permitido"));
         }
@@ -35,12 +47,14 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "video/mp4"];
+    const extension = path.extname(file.originalname).toLowerCase();
+    const isAllowedImage = ALLOWED_IMAGE_TYPES.includes(file.mimetype);
+    const isAllowedVideo = ALLOWED_VIDEO_EXTENSIONS.includes(extension);
 
-    if (allowedTypes.includes(file.mimetype)) {
+    if (isAllowedImage || isAllowedVideo) {
         cb(null, true);
     } else {
-        cb(new Error("Solo se permiten JPG, PNG, WEBP y MP4"), false);
+        cb(new Error("Solo se permiten JPG, PNG, WEBP y videos MP4, MOV, AVI, MKV, WEBM o M4V"), false);
     }
 };
 
@@ -48,9 +62,155 @@ const upload = multer({
     storage,
     fileFilter,
     limits: {
-        fileSize: 300 * 1024 * 1024,
+        fileSize: MAX_UPLOAD_SIZE,
     },
 });
+
+function runCommand(command, args) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(command, args);
+        let stdout = "";
+        let stderr = "";
+
+        child.stdout.on("data", (chunk) => {
+            stdout += chunk.toString();
+        });
+
+        child.stderr.on("data", (chunk) => {
+            stderr += chunk.toString();
+        });
+
+        child.on("error", (error) => {
+            if (error.code === "ENOENT") {
+                reject(new Error(`No se encontro ${command}. Instalalo en el servidor para procesar videos.`));
+                return;
+            }
+
+            reject(error);
+        });
+
+        child.on("close", (code) => {
+            if (code === 0) {
+                resolve({ stdout, stderr });
+                return;
+            }
+
+            const error = new Error(stderr || `${command} finalizo con codigo ${code}`);
+            error.code = code;
+            reject(error);
+        });
+    });
+}
+
+async function getVideoDurationSeconds(filePath) {
+    const { stdout } = await runCommand(FFPROBE_COMMAND, [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        filePath,
+    ]);
+
+    const metadata = JSON.parse(stdout);
+    const duration = Number(metadata.format?.duration);
+
+    if (!Number.isFinite(duration)) {
+        throw new Error("No se pudo obtener la duracion del video");
+    }
+
+    return duration;
+}
+
+async function optimizeVideo(inputPath, outputPath) {
+    await runCommand(FFMPEG_COMMAND, [
+        "-y",
+        "-i",
+        inputPath,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-sn",
+        "-dn",
+        "-vf",
+        `${VIDEO_SCALE_FILTER},format=yuv420p`,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "28",
+        "-maxrate",
+        "2M",
+        "-bufsize",
+        "4M",
+        "-r",
+        "30",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        "-movflags",
+        "+faststart",
+        outputPath,
+    ]);
+}
+
+async function createVideoThumbnail(inputPath, outputPath) {
+    await runCommand(FFMPEG_COMMAND, [
+        "-y",
+        "-ss",
+        "3",
+        "-i",
+        inputPath,
+        "-frames:v",
+        "1",
+        "-vf",
+        VIDEO_SCALE_FILTER,
+        "-q:v",
+        "3",
+        outputPath,
+    ]);
+}
+
+async function prepareOptimizedVideo(uploadedFile) {
+    const durationSeconds = await getVideoDurationSeconds(uploadedFile.path);
+
+    if (durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+        throw new Error("El video supera la duracion maxima permitida de 10 minutos.");
+    }
+
+    const videosDir = path.join(__dirname, "../uploads/videos");
+    const thumbnailsDir = path.join(__dirname, "../uploads/thumbnails");
+    await fsPromises.mkdir(videosDir, { recursive: true });
+    await fsPromises.mkdir(thumbnailsDir, { recursive: true });
+
+    const baseName = path.parse(uploadedFile.filename).name;
+    const optimizedFilename = `${baseName}.mp4`;
+    const thumbnailFilename = `${baseName}.jpg`;
+    const optimizedPath = path.join(videosDir, optimizedFilename);
+    const thumbnailPath = path.join(thumbnailsDir, thumbnailFilename);
+
+    try {
+        await optimizeVideo(uploadedFile.path, optimizedPath);
+        await createVideoThumbnail(optimizedPath, thumbnailPath);
+        await fsPromises.unlink(uploadedFile.path).catch(() => {});
+    } catch (error) {
+        await fsPromises.unlink(optimizedPath).catch(() => {});
+        await fsPromises.unlink(thumbnailPath).catch(() => {});
+        throw error;
+    }
+
+    return {
+        durationSeconds: Math.round(durationSeconds),
+        fileName: optimizedFilename,
+        filePath: optimizedPath,
+        thumbnailFilename,
+        thumbnailPath,
+    };
+}
 
 router.get(
     "/",
@@ -89,17 +249,21 @@ router.post(
             }
 
             if (!title) {
+                await fsPromises.unlink(uploadedFile.path).catch(() => {});
                 return res.status(400).json({ message: "El título es obligatorio" });
             }
 
             const isImage = uploadedFile.mimetype.startsWith("image/");
             const type = isImage ? "image" : "video";
 
+            const preparedVideo = isImage ? null : await prepareOptimizedVideo(uploadedFile);
             const folder = isImage ? "images" : "videos";
+            const fileName = isImage ? uploadedFile.filename : preparedVideo.fileName;
+            const durationSeconds = isImage ? null : preparedVideo.durationSeconds;
 
             const baseUrl = process.env.PUBLIC_BACKEND_URL || `${req.protocol}://${req.get("host")}`;
 
-            const fileUrl = `${baseUrl}/uploads/${folder}/${encodeURIComponent(uploadedFile.filename)}`;
+            const fileUrl = `${baseUrl}/uploads/${folder}/${encodeURIComponent(fileName)}`;
 
             const { data, error } = await supabase
                 .from("contents")
@@ -108,9 +272,9 @@ router.post(
                         title,
                         description: description || "",
                         type,
-                        file_name: uploadedFile.filename,
+                        file_name: fileName,
                         file_url: fileUrl,
-                        duration_seconds: null,
+                        duration_seconds: durationSeconds,
                         is_active: true,
                     },
                 ])
@@ -119,6 +283,12 @@ router.post(
 
             if (error) {
                 await fsPromises.unlink(uploadedFile.path).catch(() => {});
+                if (preparedVideo?.filePath) {
+                    await fsPromises.unlink(preparedVideo.filePath).catch(() => {});
+                }
+                if (preparedVideo?.thumbnailPath) {
+                    await fsPromises.unlink(preparedVideo.thumbnailPath).catch(() => {});
+                }
                 return res.status(400).json({ message: error.message });
             }
 
@@ -135,7 +305,7 @@ router.post(
 
             if (error.code === "LIMIT_FILE_SIZE") {
                 return res.status(400).json({
-                    message: "El archivo es demasiado grande. Máximo permitido: 300 MB.",
+                    message: "El archivo es demasiado grande. Maximo permitido: 500 MB.",
                 });
             }
 
@@ -180,6 +350,16 @@ router.delete(
                         console.error("No se pudo eliminar archivo:", unlinkError);
                     }
                 });
+
+                if (content.type === "video") {
+                    const thumbnailName = `${path.parse(content.file_name).name}.jpg`;
+                    const thumbnailPath = path.join(__dirname, "../uploads/thumbnails", thumbnailName);
+                    await fsPromises.unlink(thumbnailPath).catch((unlinkError) => {
+                        if (unlinkError.code !== "ENOENT") {
+                            console.error("No se pudo eliminar miniatura:", unlinkError);
+                        }
+                    });
+                }
             }
 
             res.json({ message: "Contenido eliminado correctamente" });

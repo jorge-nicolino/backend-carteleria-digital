@@ -54,7 +54,7 @@ app.use((error, req, res, next) => {
     if (error instanceof multer.MulterError) {
         if (error.code === "LIMIT_FILE_SIZE") {
             return res.status(400).json({
-                message: "El archivo es demasiado grande. Maximo permitido: 300 MB.",
+                message: "El archivo es demasiado grande. Maximo permitido: 500 MB.",
             });
         }
 
