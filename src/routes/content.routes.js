@@ -17,6 +17,7 @@ const FFMPEG_COMMANDS = [
     ffmpegInstaller.path,
     "ffmpeg",
 ].filter(Boolean);
+const UPLOAD_METADATA_DIR = path.join(__dirname, "../uploads/metadata");
 const VIDEO_SCALE_FILTER = "scale='if(gt(a,1280/720),min(1280,iw),-2)':'if(gt(a,1280/720),-2,min(720,ih))'";
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"];
@@ -279,6 +280,55 @@ async function getFileSize(filePath) {
     }
 }
 
+function getUploadMetadataPath(contentId) {
+    return path.join(UPLOAD_METADATA_DIR, `${contentId}.json`);
+}
+
+async function saveUploadMetadata(contentId, metadata) {
+    await fsPromises.mkdir(UPLOAD_METADATA_DIR, { recursive: true });
+    await fsPromises.writeFile(
+        getUploadMetadataPath(contentId),
+        JSON.stringify(metadata, null, 2),
+        "utf8"
+    );
+}
+
+async function readUploadMetadata(contentId) {
+    try {
+        const raw = await fsPromises.readFile(getUploadMetadataPath(contentId), "utf8");
+        return JSON.parse(raw);
+    } catch (error) {
+        return null;
+    }
+}
+
+async function deleteUploadMetadata(contentId) {
+    await fsPromises.unlink(getUploadMetadataPath(contentId)).catch(() => {});
+}
+
+function getContentFilePath(content) {
+    if (!content?.file_name || !content?.type) return null;
+
+    const folder = content.type === "image" ? "images" : "videos";
+    return path.join(__dirname, "../uploads", folder, content.file_name);
+}
+
+async function addUploadStats(content) {
+    const metadata = await readUploadMetadata(content.id);
+    const currentSizeBytes = await getFileSize(getContentFilePath(content));
+
+    return {
+        ...content,
+        upload_stats: {
+            original_size_bytes: metadata?.original_size_bytes || currentSizeBytes,
+            final_size_bytes: currentSizeBytes || metadata?.final_size_bytes || null,
+            saved_bytes: metadata?.saved_bytes || 0,
+            reduced: Boolean(metadata?.saved_bytes > 0),
+            optimized: Boolean(metadata?.optimized),
+        },
+    };
+}
+
 async function prepareOptimizedImage(uploadedFile) {
     const imagesDir = path.join(__dirname, "../uploads/images");
     await fsPromises.mkdir(imagesDir, { recursive: true });
@@ -385,7 +435,9 @@ router.get(
                 return res.status(400).json({ message: error.message });
             }
 
-            res.json(data);
+            const contentsWithStats = await Promise.all(data.map(addUploadStats));
+
+            res.json(contentsWithStats);
         } catch (error) {
             res.status(500).json({ message: "Error obteniendo contenidos" });
         }
@@ -457,14 +509,26 @@ router.post(
                 return res.status(400).json({ message: error.message });
             }
 
+            const savedBytes = originalSizeBytes && finalSizeBytes ? Math.max(originalSizeBytes - finalSizeBytes, 0) : 0;
+            const uploadStats = {
+                original_size_bytes: originalSizeBytes,
+                final_size_bytes: finalSizeBytes,
+                saved_bytes: savedBytes,
+                reduced: savedBytes > 0,
+                optimized: finalSizeBytes ? finalSizeBytes < originalSizeBytes : false,
+            };
+
+            await saveUploadMetadata(data.id, uploadStats).catch((metadataError) => {
+                console.warn("No se pudo guardar metadata de peso:", metadataError.message);
+            });
+
             res.status(201).json({
                 message: "Contenido subido correctamente",
-                content: data,
-                upload: {
-                    original_size_bytes: originalSizeBytes,
-                    final_size_bytes: finalSizeBytes,
-                    saved_bytes: originalSizeBytes && finalSizeBytes ? Math.max(originalSizeBytes - finalSizeBytes, 0) : null,
+                content: {
+                    ...data,
+                    upload_stats: uploadStats,
                 },
+                upload: uploadStats,
             });
         } catch (error) {
             console.error("Error subiendo contenido:", error);
@@ -531,6 +595,8 @@ router.delete(
                     });
                 }
             }
+
+            await deleteUploadMetadata(id);
 
             res.json({ message: "Contenido eliminado correctamente" });
         } catch (error) {
