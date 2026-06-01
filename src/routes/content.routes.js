@@ -65,7 +65,7 @@ const upload = multer({
     },
 });
 
-function runCommand(command, args) {
+function runCommand(command, args, options = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(command, args);
         let stdout = "";
@@ -89,8 +89,8 @@ function runCommand(command, args) {
         });
 
         child.on("close", (code) => {
-            if (code === 0) {
-                resolve({ stdout, stderr });
+            if (code === 0 || options.allowNonZeroExit) {
+                resolve({ stdout, stderr, code });
                 return;
             }
 
@@ -102,17 +102,25 @@ function runCommand(command, args) {
 }
 
 async function getVideoDurationSeconds(filePath) {
-    const { stdout } = await runCommand(FFMPEG_COMMAND, [
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "json",
+    const { stdout, stderr } = await runCommand(FFMPEG_COMMAND, [
+        "-hide_banner",
         "-i",
         filePath,
-    ]);
+    ], { allowNonZeroExit: true });
 
+    const output = `${stdout}\n${stderr}`;
+    const durationMatch = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+
+    if (durationMatch) {
+        const hours = parseInt(durationMatch[1], 10);
+        const minutes = parseInt(durationMatch[2], 10);
+        const seconds = parseFloat(durationMatch[3]);
+        return hours * 3600 + minutes * 60 + seconds;
+    }
+
+    throw new Error("No se pudo obtener la duracion del video");
+
+    /*
     try {
         const metadata = JSON.parse(stdout);
         const duration = Number(metadata.format?.duration);
@@ -133,6 +141,7 @@ async function getVideoDurationSeconds(filePath) {
         }
         throw e;
     }
+    */
 }
 
 async function optimizeVideo(inputPath, outputPath) {
