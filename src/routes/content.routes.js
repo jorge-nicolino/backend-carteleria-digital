@@ -12,7 +12,11 @@ const router = express.Router();
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024;
 const MAX_VIDEO_DURATION_SECONDS = 10 * 60;
-const FFMPEG_COMMAND = process.env.FFMPEG_PATH || ffmpegInstaller.path || "ffmpeg";
+const FFMPEG_COMMANDS = [
+    process.env.FFMPEG_PATH,
+    ffmpegInstaller.path,
+    "ffmpeg",
+].filter(Boolean);
 const VIDEO_SCALE_FILTER = "scale='if(gt(a,1280/720),min(1280,iw),-2)':'if(gt(a,1280/720),-2,min(720,ih))'";
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"];
@@ -101,8 +105,40 @@ function runCommand(command, args, options = {}) {
     });
 }
 
+async function runFfmpeg(args, options = {}) {
+    const errors = [];
+
+    for (const command of FFMPEG_COMMANDS) {
+        try {
+            return await runCommand(command, args, options);
+        } catch (error) {
+            if (error.code === "EACCES" && path.isAbsolute(command)) {
+                try {
+                    await fsPromises.chmod(command, 0o755);
+                    return await runCommand(command, args, options);
+                } catch (retryError) {
+                    errors.push(`${command}: ${retryError.message}`);
+                    continue;
+                }
+            }
+
+            errors.push(`${command}: ${error.message}`);
+
+            if (!["EACCES", "ENOENT"].includes(error.code)) {
+                throw error;
+            }
+        }
+    }
+
+    const error = new Error(
+        "No se pudo ejecutar ffmpeg en el servidor. Verifica permisos del binario o configura FFMPEG_PATH."
+    );
+    error.details = errors;
+    throw error;
+}
+
 async function getVideoDurationSeconds(filePath) {
-    const { stdout, stderr } = await runCommand(FFMPEG_COMMAND, [
+    const { stdout, stderr } = await runFfmpeg([
         "-hide_banner",
         "-i",
         filePath,
@@ -145,7 +181,7 @@ async function getVideoDurationSeconds(filePath) {
 }
 
 async function optimizeVideo(inputPath, outputPath) {
-    await runCommand(FFMPEG_COMMAND, [
+    await runFfmpeg([
         "-y",
         "-i",
         inputPath,
@@ -203,7 +239,7 @@ async function optimizeImage(inputPath, outputPath, mimeType) {
 }
 
 async function createVideoThumbnail(inputPath, outputPath) {
-    await runCommand(FFMPEG_COMMAND, [
+    await runFfmpeg([
         "-y",
         "-ss",
         "3",
