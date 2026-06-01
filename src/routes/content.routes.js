@@ -241,10 +241,10 @@ async function optimizeImage(inputPath, outputPath, mimeType) {
 async function createVideoThumbnail(inputPath, outputPath) {
     await runFfmpeg([
         "-y",
-        "-ss",
-        "3",
         "-i",
         inputPath,
+        "-ss",
+        "00:00:00.5",
         "-frames:v",
         "1",
         "-vf",
@@ -253,6 +253,30 @@ async function createVideoThumbnail(inputPath, outputPath) {
         "3",
         outputPath,
     ]);
+}
+
+async function moveFile(sourcePath, targetPath) {
+    await fsPromises.mkdir(path.dirname(targetPath), { recursive: true });
+
+    try {
+        await fsPromises.rename(sourcePath, targetPath);
+    } catch (error) {
+        if (error.code !== "EXDEV") {
+            throw error;
+        }
+
+        await fsPromises.copyFile(sourcePath, targetPath);
+        await fsPromises.unlink(sourcePath).catch(() => {});
+    }
+}
+
+async function getFileSize(filePath) {
+    try {
+        const stats = await fsPromises.stat(filePath);
+        return stats.size;
+    } catch (error) {
+        return null;
+    }
 }
 
 async function prepareOptimizedImage(uploadedFile) {
@@ -268,8 +292,12 @@ async function prepareOptimizedImage(uploadedFile) {
         await optimizeImage(uploadedFile.path, optimizedPath, "image/webp");
         await fsPromises.unlink(uploadedFile.path).catch(() => {});
     } catch (error) {
+        console.warn("No se pudo optimizar la imagen. Se conserva el archivo original:", error.message);
         await fsPromises.unlink(optimizedPath).catch(() => {});
-        throw error;
+        return {
+            fileName: uploadedFile.filename,
+            filePath: uploadedFile.path,
+        };
     }
 
     return {
@@ -278,17 +306,43 @@ async function prepareOptimizedImage(uploadedFile) {
     };
 }
 
+async function keepOriginalVideo(uploadedFile) {
+    const videosDir = path.join(__dirname, "../uploads/videos");
+    await fsPromises.mkdir(videosDir, { recursive: true });
+
+    const originalExtension = path.extname(uploadedFile.filename).toLowerCase() || ".mp4";
+    const baseName = path.parse(uploadedFile.filename).name;
+    const originalFilename = `${baseName}${originalExtension}`;
+    const originalPath = path.join(videosDir, originalFilename);
+
+    await moveFile(uploadedFile.path, originalPath);
+
+    return {
+        durationSeconds: null,
+        fileName: originalFilename,
+        filePath: originalPath,
+        thumbnailFilename: null,
+        thumbnailPath: null,
+    };
+}
+
 async function prepareOptimizedVideo(uploadedFile) {
-    const durationSeconds = await getVideoDurationSeconds(uploadedFile.path);
-
-    if (durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
-        throw new Error("El video supera la duracion maxima permitida de 10 minutos.");
-    }
-
     const videosDir = path.join(__dirname, "../uploads/videos");
     const thumbnailsDir = path.join(__dirname, "../uploads/thumbnails");
     await fsPromises.mkdir(videosDir, { recursive: true });
     await fsPromises.mkdir(thumbnailsDir, { recursive: true });
+
+    let durationSeconds = null;
+
+    try {
+        durationSeconds = await getVideoDurationSeconds(uploadedFile.path);
+    } catch (error) {
+        console.warn("No se pudo calcular la duracion del video. Se continua con el archivo original:", error.message);
+    }
+
+    if (durationSeconds && durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+        throw new Error("El video supera la duracion maxima permitida de 10 minutos.");
+    }
 
     const baseName = path.parse(uploadedFile.filename).name;
     const optimizedFilename = `${baseName}.mp4`;
@@ -301,13 +355,14 @@ async function prepareOptimizedVideo(uploadedFile) {
         await createVideoThumbnail(optimizedPath, thumbnailPath);
         await fsPromises.unlink(uploadedFile.path).catch(() => {});
     } catch (error) {
+        console.warn("No se pudo optimizar el video. Se conserva el archivo original:", error.message);
         await fsPromises.unlink(optimizedPath).catch(() => {});
         await fsPromises.unlink(thumbnailPath).catch(() => {});
-        throw error;
+        return keepOriginalVideo(uploadedFile);
     }
 
     return {
-        durationSeconds: Math.round(durationSeconds),
+        durationSeconds: durationSeconds ? Math.round(durationSeconds) : null,
         fileName: optimizedFilename,
         filePath: optimizedPath,
         thumbnailFilename,
@@ -364,6 +419,9 @@ router.post(
             const folder = isImage ? "images" : "videos";
             const fileName = isImage ? preparedImage.fileName : preparedVideo.fileName;
             const durationSeconds = isImage ? null : preparedVideo.durationSeconds;
+            const finalPath = isImage ? preparedImage.filePath : preparedVideo.filePath;
+            const originalSizeBytes = uploadedFile.size || null;
+            const finalSizeBytes = await getFileSize(finalPath);
 
             const baseUrl = process.env.PUBLIC_BACKEND_URL || `${req.protocol}://${req.get("host")}`;
 
@@ -402,6 +460,11 @@ router.post(
             res.status(201).json({
                 message: "Contenido subido correctamente",
                 content: data,
+                upload: {
+                    original_size_bytes: originalSizeBytes,
+                    final_size_bytes: finalSizeBytes,
+                    saved_bytes: originalSizeBytes && finalSizeBytes ? Math.max(originalSizeBytes - finalSizeBytes, 0) : null,
+                },
             });
         } catch (error) {
             console.error("Error subiendo contenido:", error);
