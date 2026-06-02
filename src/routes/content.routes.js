@@ -21,6 +21,12 @@ const UPLOAD_METADATA_DIR = path.join(__dirname, "../uploads/metadata");
 const VIDEO_SCALE_FILTER = "scale='if(gt(a,1280/720),min(1280,iw),-2)':'if(gt(a,1280/720),-2,min(720,ih))'";
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"];
+const OPTIMIZATION_STATUS = {
+    PENDING: "pending",
+    REDUCED: "reduced",
+    NOT_REDUCED: "not_reduced",
+    FAILED: "failed",
+};
 
 const {
     verifyToken,
@@ -325,6 +331,8 @@ async function addUploadStats(content) {
             saved_bytes: metadata?.saved_bytes || 0,
             reduced: Boolean(metadata?.saved_bytes > 0),
             optimized: Boolean(metadata?.optimized),
+            optimization_status: metadata?.optimization_status || null,
+            optimization_message: metadata?.optimization_message || "",
         },
     };
 }
@@ -376,48 +384,99 @@ async function keepOriginalVideo(uploadedFile) {
     };
 }
 
-async function prepareOptimizedVideo(uploadedFile) {
-    const videosDir = path.join(__dirname, "../uploads/videos");
-    const thumbnailsDir = path.join(__dirname, "../uploads/thumbnails");
-    await fsPromises.mkdir(videosDir, { recursive: true });
-    await fsPromises.mkdir(thumbnailsDir, { recursive: true });
+function buildUploadUrl(baseUrl, folder, fileName) {
+    return `${baseUrl}/uploads/${folder}/${encodeURIComponent(fileName)}`;
+}
 
-    let durationSeconds = null;
+function queueVideoOptimization(options) {
+    setTimeout(() => {
+        optimizeStoredVideo(options).catch((error) => {
+            console.error("Error optimizando video en segundo plano:", error);
+        });
+    }, 0);
+}
 
-    try {
-        durationSeconds = await getVideoDurationSeconds(uploadedFile.path);
-    } catch (error) {
-        console.warn("No se pudo calcular la duracion del video. Se continua con el archivo original:", error.message);
-    }
-
-    if (durationSeconds && durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
-        throw new Error("El video supera la duracion maxima permitida de 10 minutos.");
-    }
-
-    const baseName = path.parse(uploadedFile.filename).name;
-    const optimizedFilename = `${baseName}.mp4`;
-    const thumbnailFilename = `${baseName}.jpg`;
-    const optimizedPath = path.join(videosDir, optimizedFilename);
-    const thumbnailPath = path.join(thumbnailsDir, thumbnailFilename);
+async function optimizeStoredVideo({ contentId, fileName, filePath, baseUrl, originalSizeBytes }) {
+    const baseName = path.parse(fileName).name;
+    const optimizedFilename = `${baseName}-optimizado.mp4`;
+    const thumbnailFilename = `${baseName}-optimizado.jpg`;
+    const optimizedPath = path.join(__dirname, "../uploads/videos", optimizedFilename);
+    const thumbnailPath = path.join(__dirname, "../uploads/thumbnails", thumbnailFilename);
 
     try {
-        await optimizeVideo(uploadedFile.path, optimizedPath);
-        await createVideoThumbnail(optimizedPath, thumbnailPath);
-        await fsPromises.unlink(uploadedFile.path).catch(() => {});
+        const durationSeconds = await getVideoDurationSeconds(filePath);
+
+        if (durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+            await saveUploadMetadata(contentId, {
+                original_size_bytes: originalSizeBytes,
+                final_size_bytes: originalSizeBytes,
+                saved_bytes: 0,
+                reduced: false,
+                optimized: false,
+                optimization_status: OPTIMIZATION_STATUS.FAILED,
+                optimization_message: "El video supera la duracion maxima permitida.",
+            });
+            return;
+        }
+
+        await optimizeVideo(filePath, optimizedPath);
+        const finalSizeBytes = await getFileSize(optimizedPath);
+
+        if (!finalSizeBytes || finalSizeBytes >= originalSizeBytes) {
+            await fsPromises.unlink(optimizedPath).catch(() => {});
+            await saveUploadMetadata(contentId, {
+                original_size_bytes: originalSizeBytes,
+                final_size_bytes: originalSizeBytes,
+                saved_bytes: 0,
+                reduced: false,
+                optimized: false,
+                optimization_status: OPTIMIZATION_STATUS.NOT_REDUCED,
+                optimization_message: "El archivo optimizado no era mas liviano.",
+            });
+            return;
+        }
+
+        await createVideoThumbnail(optimizedPath, thumbnailPath).catch((error) => {
+            console.warn("No se pudo crear miniatura optimizada:", error.message);
+        });
+
+        const fileUrl = buildUploadUrl(baseUrl, "videos", optimizedFilename);
+        const { error } = await supabase
+            .from("contents")
+            .update({
+                file_name: optimizedFilename,
+                file_url: fileUrl,
+                duration_seconds: Math.round(durationSeconds),
+            })
+            .eq("id", contentId);
+
+        if (error) {
+            throw error;
+        }
+
+        await fsPromises.unlink(filePath).catch(() => {});
+        await saveUploadMetadata(contentId, {
+            original_size_bytes: originalSizeBytes,
+            final_size_bytes: finalSizeBytes,
+            saved_bytes: originalSizeBytes - finalSizeBytes,
+            reduced: true,
+            optimized: true,
+            optimization_status: OPTIMIZATION_STATUS.REDUCED,
+            optimization_message: "Video reducido correctamente.",
+        });
     } catch (error) {
-        console.warn("No se pudo optimizar el video. Se conserva el archivo original:", error.message);
         await fsPromises.unlink(optimizedPath).catch(() => {});
         await fsPromises.unlink(thumbnailPath).catch(() => {});
-        return keepOriginalVideo(uploadedFile);
+        await saveUploadMetadata(contentId, {
+            original_size_bytes: originalSizeBytes,
+            final_size_bytes: originalSizeBytes,
+            saved_bytes: 0,
+            reduced: false,
+            optimized: false,
+            optimization_status: OPTIMIZATION_STATUS.FAILED,
+            optimization_message: error.message || "No se pudo optimizar el video.",
+        }).catch(() => {});
     }
-
-    return {
-        durationSeconds: durationSeconds ? Math.round(durationSeconds) : null,
-        fileName: optimizedFilename,
-        filePath: optimizedPath,
-        thumbnailFilename,
-        thumbnailPath,
-    };
 }
 
 router.get(
@@ -467,7 +526,7 @@ router.post(
             const type = isImage ? "image" : "video";
 
             const preparedImage = isImage ? await prepareOptimizedImage(uploadedFile) : null;
-            const preparedVideo = isImage ? null : await prepareOptimizedVideo(uploadedFile);
+            const preparedVideo = isImage ? null : await keepOriginalVideo(uploadedFile);
             const folder = isImage ? "images" : "videos";
             const fileName = isImage ? preparedImage.fileName : preparedVideo.fileName;
             const durationSeconds = isImage ? null : preparedVideo.durationSeconds;
@@ -477,7 +536,7 @@ router.post(
 
             const baseUrl = process.env.PUBLIC_BACKEND_URL || `${req.protocol}://${req.get("host")}`;
 
-            const fileUrl = `${baseUrl}/uploads/${folder}/${encodeURIComponent(fileName)}`;
+            const fileUrl = buildUploadUrl(baseUrl, folder, fileName);
 
             const { data, error } = await supabase
                 .from("contents")
@@ -516,11 +575,27 @@ router.post(
                 saved_bytes: savedBytes,
                 reduced: savedBytes > 0,
                 optimized: finalSizeBytes ? finalSizeBytes < originalSizeBytes : false,
+                optimization_status: isImage
+                    ? (savedBytes > 0 ? OPTIMIZATION_STATUS.REDUCED : OPTIMIZATION_STATUS.NOT_REDUCED)
+                    : OPTIMIZATION_STATUS.PENDING,
+                optimization_message: isImage
+                    ? (savedBytes > 0 ? "Imagen reducida correctamente." : "La imagen se guardo sin reduccion.")
+                    : "Video guardado. Optimizacion en segundo plano.",
             };
 
             await saveUploadMetadata(data.id, uploadStats).catch((metadataError) => {
                 console.warn("No se pudo guardar metadata de peso:", metadataError.message);
             });
+
+            if (!isImage) {
+                queueVideoOptimization({
+                    contentId: data.id,
+                    fileName,
+                    filePath: finalPath,
+                    baseUrl,
+                    originalSizeBytes: finalSizeBytes || originalSizeBytes,
+                });
+            }
 
             res.status(201).json({
                 message: "Contenido subido correctamente",
