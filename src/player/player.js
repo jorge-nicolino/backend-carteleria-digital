@@ -9,16 +9,22 @@ let isPlaying = false;
 let playbackToken = 0;
 let activeTimers = [];
 let serverClockOffsetMs = 0;
+let wakeLock = null;
 
 if (!DEVICE_ID) {
     showMessage("No se indicó deviceId en la URL");
 } else {
     loadPlaylist(true);
+    keepPlayerActive();
 
     // refresca playlist cada 60 segundos
     setInterval(() => {
         loadPlaylist(false);
     }, 60000);
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handlePlayerVisible);
+    window.addEventListener("pageshow", handlePlayerVisible);
 }
 
 async function loadPlaylist(resetPlayer = false) {
@@ -69,6 +75,7 @@ function playCurrent() {
     const remainingSeconds = Math.max(itemDuration - elapsedSeconds, 0.25);
 
     const player = document.getElementById("player");
+    disposePlayerMedia(player);
     player.innerHTML = "";
 
     if (!content) {
@@ -101,7 +108,7 @@ function playCurrent() {
         video.autoplay = true;
         video.muted = true;
         video.playsInline = true;
-        video.preload = "auto";
+        video.preload = "metadata";
 
         player.appendChild(video);
 
@@ -110,6 +117,7 @@ function playCurrent() {
                 ? Math.max(video.duration - 0.25, 0)
                 : elapsedSeconds;
             video.currentTime = Math.min(elapsedSeconds, maxSeek);
+            playVideo(video, token);
         };
 
         video.onended = () => {
@@ -122,10 +130,6 @@ function playCurrent() {
         };
 
         video.load();
-        video.play().catch((error) => {
-            console.error("No se pudo iniciar el video", error);
-            nextItem(token);
-        });
 
         // fallback si no dispara onended
         const timerId = setTimeout(() => {
@@ -158,6 +162,66 @@ function nextItem(token) {
 function clearPlaybackTimers() {
     activeTimers.forEach((timerId) => clearTimeout(timerId));
     activeTimers = [];
+}
+
+function disposePlayerMedia(player) {
+    const mediaElements = player.querySelectorAll("video, audio");
+
+    mediaElements.forEach((media) => {
+        media.pause();
+        media.removeAttribute("src");
+        media.load();
+    });
+}
+
+function playVideo(video, token) {
+    if (token && token !== playbackToken) {
+        return;
+    }
+
+    video.play().catch((error) => {
+        if (document.hidden) {
+            return;
+        }
+
+        console.error("No se pudo iniciar el video", error);
+        nextItem(token);
+    });
+}
+
+async function keepPlayerActive() {
+    if (!("wakeLock" in navigator) || document.hidden) {
+        return;
+    }
+
+    try {
+        wakeLock = await navigator.wakeLock.request("screen");
+        wakeLock.addEventListener("release", () => {
+            wakeLock = null;
+        });
+    } catch (error) {
+        console.warn("No se pudo mantener la pantalla activa", error);
+    }
+}
+
+function handleVisibilityChange() {
+    if (document.hidden) {
+        return;
+    }
+
+    handlePlayerVisible();
+}
+
+function handlePlayerVisible() {
+    keepPlayerActive();
+
+    if (!playlist.length) {
+        loadPlaylist(true);
+        return;
+    }
+
+    currentIndex = getSyncedPlaybackPosition().index;
+    playCurrent();
 }
 
 function updateServerClockOffset(serverTime) {
