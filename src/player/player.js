@@ -89,6 +89,9 @@ function playCurrent() {
     if (content.type === "image") {
         const img = document.createElement("img");
         img.src = content.file_url;
+        img.addEventListener("contextmenu", (event) => {
+            downloadCurrentContent(event, content);
+        });
 
         player.appendChild(img);
 
@@ -109,6 +112,9 @@ function playCurrent() {
         video.muted = true;
         video.playsInline = true;
         video.preload = "metadata";
+        video.addEventListener("contextmenu", (event) => {
+            downloadCurrentContent(event, content);
+        });
 
         player.appendChild(video);
 
@@ -162,6 +168,36 @@ function nextItem(token) {
 function clearPlaybackTimers() {
     activeTimers.forEach((timerId) => clearTimeout(timerId));
     activeTimers = [];
+}
+
+function downloadCurrentContent(event, content) {
+    if (!content?.file_url) {
+        return;
+    }
+
+    event.preventDefault();
+
+    const link = document.createElement("a");
+    link.href = content.file_url;
+    link.download = getDownloadFileName(content);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function getDownloadFileName(content) {
+    const urlFileName = decodeURIComponent(new URL(content.file_url, window.location.origin).pathname.split("/").pop() || "");
+    const fileName = content.file_name || urlFileName;
+
+    if (pathHasExtension(fileName)) {
+        return fileName;
+    }
+
+    return content.type === "video" ? `${fileName}.mp4` : `${fileName}.jpg`;
+}
+
+function pathHasExtension(fileName) {
+    return /\.[a-z0-9]+$/i.test(fileName);
 }
 
 function disposePlayerMedia(player) {
