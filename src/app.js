@@ -26,8 +26,26 @@ app.use("/api/users", userRoutes);
 
 app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
     maxAge: "7d",
-    setHeaders: (res) => {
+    setHeaders: (res, filePath) => {
         res.setHeader("Cache-Control", "public, max-age=604800");
+
+        if (filePath.includes(`${path.sep}videos${path.sep}`)) {
+            const fileName = path.basename(filePath);
+            const extension = path.extname(filePath).toLowerCase();
+            const videoTypes = {
+                ".mp4": "video/mp4",
+                ".m4v": "video/mp4",
+                ".mov": "video/quicktime",
+                ".webm": "video/webm",
+                ".avi": "video/x-msvideo",
+                ".mkv": "video/x-matroska",
+            };
+
+            if (videoTypes[extension]) {
+                res.setHeader("Content-Type", videoTypes[extension]);
+                res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+            }
+        }
     },
 }));
 
