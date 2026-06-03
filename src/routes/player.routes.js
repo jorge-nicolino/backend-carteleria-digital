@@ -49,6 +49,7 @@ router.get("/:deviceId", async (req, res) => {
         }
 
         res.json({
+            server_time: new Date().toISOString(),
             screen: {
                 id: screen.id,
                 name: screen.name,

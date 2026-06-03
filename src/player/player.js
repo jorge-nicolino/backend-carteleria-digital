@@ -8,6 +8,7 @@ let currentIndex = 0;
 let isPlaying = false;
 let playbackToken = 0;
 let activeTimers = [];
+let serverClockOffsetMs = 0;
 
 if (!DEVICE_ID) {
     showMessage("No se indicó deviceId en la URL");
@@ -31,6 +32,7 @@ async function loadPlaylist(resetPlayer = false) {
         }
 
         const newPlaylist = data.items || [];
+        updateServerClockOffset(data.server_time);
 
         if (!newPlaylist.length) {
             showMessage("No hay contenidos en la playlist");
@@ -38,12 +40,9 @@ async function loadPlaylist(resetPlayer = false) {
         }
 
         playlist = newPlaylist;
-        if (currentIndex >= playlist.length) {
-            currentIndex = 0;
-        }
 
-        if (resetPlayer && !isPlaying) {
-            currentIndex = 0;
+        if (resetPlayer || !isPlaying || shouldRealignPlayback()) {
+            currentIndex = getSyncedPlaybackPosition().index;
             playCurrent();
         }
     } catch (err) {
@@ -60,8 +59,14 @@ function playCurrent() {
     playbackToken++;
     const token = playbackToken;
 
+    const syncedPosition = getSyncedPlaybackPosition();
+    currentIndex = syncedPosition.index;
+
     const item = playlist[currentIndex];
     const content = item.contents;
+    const itemDuration = getItemDuration(item);
+    const elapsedSeconds = syncedPosition.elapsedSeconds;
+    const remainingSeconds = Math.max(itemDuration - elapsedSeconds, 0.25);
 
     const player = document.getElementById("player");
     player.innerHTML = "";
@@ -80,13 +85,9 @@ function playCurrent() {
 
         player.appendChild(img);
 
-        const duration =
-            item.duration_seconds ||
-            10;
-
         const timerId = setTimeout(() => {
             nextItem(token);
-        }, duration * 1000);
+        }, remainingSeconds * 1000);
         activeTimers.push(timerId);
     }
 
@@ -104,6 +105,13 @@ function playCurrent() {
 
         player.appendChild(video);
 
+        video.onloadedmetadata = () => {
+            const maxSeek = Number.isFinite(video.duration)
+                ? Math.max(video.duration - 0.25, 0)
+                : elapsedSeconds;
+            video.currentTime = Math.min(elapsedSeconds, maxSeek);
+        };
+
         video.onended = () => {
             nextItem(token);
         };
@@ -120,18 +128,14 @@ function playCurrent() {
         });
 
         // fallback si no dispara onended
-        const fallbackDuration = item.duration_seconds;
+        const timerId = setTimeout(() => {
+            if (!video.paused) {
+                video.pause();
+            }
 
-        if (fallbackDuration) {
-            const timerId = setTimeout(() => {
-                if (!video.paused) {
-                    video.pause();
-                }
-
-                nextItem(token);
-            }, fallbackDuration * 1000);
-            activeTimers.push(timerId);
-        }
+            nextItem(token);
+        }, remainingSeconds * 1000);
+        activeTimers.push(timerId);
     }
 }
 
@@ -154,6 +158,70 @@ function nextItem(token) {
 function clearPlaybackTimers() {
     activeTimers.forEach((timerId) => clearTimeout(timerId));
     activeTimers = [];
+}
+
+function updateServerClockOffset(serverTime) {
+    const serverTimeMs = Date.parse(serverTime);
+
+    if (Number.isFinite(serverTimeMs)) {
+        serverClockOffsetMs = serverTimeMs - Date.now();
+    }
+}
+
+function getSyncedNowMs() {
+    return Date.now() + serverClockOffsetMs;
+}
+
+function getItemDuration(item) {
+    const videoDuration = Number(item?.contents?.duration_seconds);
+    const itemDuration = Number(item?.duration_seconds);
+    const duration = item?.contents?.type === "video" && videoDuration > 0
+        ? videoDuration
+        : itemDuration;
+
+    return Number.isFinite(duration) && duration > 0 ? duration : 10;
+}
+
+function getSyncedPlaybackPosition() {
+    const totalDuration = playlist.reduce((total, item) => total + getItemDuration(item), 0);
+
+    if (!playlist.length || totalDuration <= 0) {
+        return { index: 0, elapsedSeconds: 0 };
+    }
+
+    const elapsedInCycle = (getSyncedNowMs() / 1000) % totalDuration;
+    let accumulated = 0;
+
+    for (let index = 0; index < playlist.length; index++) {
+        const duration = getItemDuration(playlist[index]);
+
+        if (elapsedInCycle < accumulated + duration) {
+            return {
+                index,
+                elapsedSeconds: elapsedInCycle - accumulated,
+            };
+        }
+
+        accumulated += duration;
+    }
+
+    return { index: 0, elapsedSeconds: 0 };
+}
+
+function shouldRealignPlayback() {
+    const syncedPosition = getSyncedPlaybackPosition();
+
+    if (syncedPosition.index !== currentIndex) {
+        return true;
+    }
+
+    const activeVideo = document.querySelector("#player video");
+
+    if (activeVideo && Math.abs(activeVideo.currentTime - syncedPosition.elapsedSeconds) > 2) {
+        return true;
+    }
+
+    return false;
 }
 
 function showMessage(message) {
