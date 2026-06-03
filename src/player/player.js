@@ -88,7 +88,7 @@ function playCurrent() {
     // =====================
     if (content.type === "image") {
         const img = document.createElement("img");
-        img.src = content.file_url;
+        img.src = getAssetUrl(content.file_url);
 
         player.appendChild(img);
 
@@ -104,7 +104,7 @@ function playCurrent() {
     if (content.type === "video") {
         const video = document.createElement("video");
 
-        video.src = content.file_url;
+        video.src = getAssetUrl(content.file_url);
         video.autoplay = true;
         video.muted = true;
         video.playsInline = true;
@@ -162,6 +162,20 @@ function nextItem(token) {
 function clearPlaybackTimers() {
     activeTimers.forEach((timerId) => clearTimeout(timerId));
     activeTimers = [];
+}
+
+function getAssetUrl(fileUrl) {
+    if (!fileUrl) {
+        return "";
+    }
+
+    const url = new URL(fileUrl, window.location.origin);
+
+    if (url.pathname.startsWith("/uploads/")) {
+        return `${window.location.origin}${url.pathname}`;
+    }
+
+    return url.href;
 }
 
 function disposePlayerMedia(player) {
