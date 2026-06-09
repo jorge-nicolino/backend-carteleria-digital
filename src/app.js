@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 const multer = require("multer");
 require("dotenv").config();
 
@@ -10,6 +11,7 @@ const playlistRoutes = require("./routes/playlist.routes");
 const playerRoutes = require("./routes/player.routes");
 const screenRoutes = require("./routes/screen.routes");
 const userRoutes = require("./routes/user.routes");
+const supabase = require("./db");
 
 const app = express();
 
@@ -51,7 +53,78 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
 
 app.use("/player-files", express.static(path.join(__dirname, "player")));
 
-app.get("/player", (req, res) => {
+async function sendPlayerVideoDownload(req, res) {
+    const { deviceId } = req.query;
+
+    if (!deviceId) {
+        return res.status(400).json({ message: "No se indico deviceId en la URL" });
+    }
+
+    const { data: screen, error: screenError } = await supabase
+        .from("screens")
+        .select("*")
+        .eq("device_id", deviceId)
+        .eq("is_active", true)
+        .single();
+
+    if (screenError || !screen) {
+        return res.status(404).json({ message: "Pantalla no encontrada o inactiva" });
+    }
+
+    if (!screen.playlist_id) {
+        return res.status(400).json({ message: "La pantalla no tiene playlist asignada" });
+    }
+
+    const { data: items, error: itemsError } = await supabase
+        .from("playlist_items")
+        .select(`
+        id,
+        order_index,
+        contents (*)
+        `)
+        .eq("playlist_id", screen.playlist_id)
+        .order("order_index", { ascending: true });
+
+    if (itemsError) {
+        return res.status(400).json({ message: itemsError.message });
+    }
+
+    const videoNumber = Number.parseInt(req.query.video || "1", 10);
+
+    if (!Number.isInteger(videoNumber) || videoNumber < 1) {
+        return res.status(400).json({ message: "El numero de video debe ser mayor o igual a 1" });
+    }
+
+    const videoContents = (items || [])
+        .map((item) => item.contents)
+        .filter((content) => content?.type === "video" && /\.mp4$/i.test(content.file_name || ""));
+    const videoContent = videoContents[videoNumber - 1];
+
+    if (!videoContent) {
+        return res.status(404).json({ message: `La playlist no tiene un video MP4 descargable en la posicion ${videoNumber}` });
+    }
+
+    const videosDir = path.resolve(__dirname, "uploads", "videos");
+    const filePath = path.resolve(videosDir, videoContent.file_name);
+
+    if (!filePath.startsWith(`${videosDir}${path.sep}`) || !fs.existsSync(filePath)) {
+        return res.status(404).json({ message: "Archivo de video no encontrado" });
+    }
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.download(filePath, videoContent.file_name);
+}
+
+app.get("/player", async (req, res, next) => {
+    if (req.query.download === "1" || req.query.format === "mp4") {
+        try {
+            await sendPlayerVideoDownload(req, res);
+        } catch (error) {
+            next(error);
+        }
+        return;
+    }
+
     res.sendFile(path.join(__dirname, "player", "index.html"));
 });
 

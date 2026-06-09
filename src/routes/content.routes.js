@@ -577,25 +577,15 @@ router.post(
                 optimized: finalSizeBytes ? finalSizeBytes < originalSizeBytes : false,
                 optimization_status: isImage
                     ? (savedBytes > 0 ? OPTIMIZATION_STATUS.REDUCED : OPTIMIZATION_STATUS.NOT_REDUCED)
-                    : OPTIMIZATION_STATUS.PENDING,
+                    : OPTIMIZATION_STATUS.NOT_REDUCED,
                 optimization_message: isImage
                     ? (savedBytes > 0 ? "Imagen reducida correctamente." : "La imagen se guardo sin reduccion.")
-                    : "Video guardado. Optimizacion en segundo plano.",
+                    : "Video guardado sin compresion.",
             };
 
             await saveUploadMetadata(data.id, uploadStats).catch((metadataError) => {
                 console.warn("No se pudo guardar metadata de peso:", metadataError.message);
             });
-
-            if (!isImage) {
-                queueVideoOptimization({
-                    contentId: data.id,
-                    fileName,
-                    filePath: finalPath,
-                    baseUrl,
-                    originalSizeBytes: finalSizeBytes || originalSizeBytes,
-                });
-            }
 
             res.status(201).json({
                 message: "Contenido subido correctamente",

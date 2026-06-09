@@ -10,6 +10,7 @@ let playbackToken = 0;
 let activeTimers = [];
 let serverClockOffsetMs = 0;
 let wakeLock = null;
+let hasCompletedPlaylist = false;
 
 if (!DEVICE_ID) {
     showMessage("No se indicó deviceId en la URL");
@@ -47,7 +48,11 @@ async function loadPlaylist(resetPlayer = false) {
 
         playlist = newPlaylist;
 
-        if (resetPlayer || !isPlaying || shouldRealignPlayback()) {
+        if (resetPlayer) {
+            hasCompletedPlaylist = false;
+        }
+
+        if (resetPlayer || (!isPlaying && !hasCompletedPlaylist) || (!hasCompletedPlaylist && shouldRealignPlayback())) {
             currentIndex = getSyncedPlaybackPosition().index;
             playCurrent();
         }
@@ -61,6 +66,7 @@ function playCurrent() {
     if (!playlist.length) return;
 
     isPlaying = true;
+    hasCompletedPlaylist = false;
     clearPlaybackTimers();
     playbackToken++;
     const token = playbackToken;
@@ -153,10 +159,25 @@ function nextItem(token) {
     currentIndex++;
 
     if (currentIndex >= playlist.length) {
-        currentIndex = 0;
+        finishPlaylist(token);
+        return;
     }
 
     playCurrent();
+}
+
+function finishPlaylist(token) {
+    if (token && token !== playbackToken) {
+        return;
+    }
+
+    isPlaying = false;
+    hasCompletedPlaylist = true;
+    clearPlaybackTimers();
+
+    const player = document.getElementById("player");
+    disposePlayerMedia(player);
+    player.innerHTML = "";
 }
 
 function clearPlaybackTimers() {
@@ -231,6 +252,10 @@ function handlePlayerVisible() {
 
     if (!playlist.length) {
         loadPlaylist(true);
+        return;
+    }
+
+    if (hasCompletedPlaylist) {
         return;
     }
 
